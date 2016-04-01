@@ -1,0 +1,340 @@
+#define RTOD 57.2957795
+#define DTOR 0.01745329252392839860045886974973
+// Constants to convert to/from radians/degrees.
+
+#define WRATIO 0.011904762
+#define VRATIO 0.028571429
+#define URATIO 0.0375
+// Ratios of the geartrains on each motor.
+
+#define VMAG 25
+#define UMAG 23
+// Lengths of the limbs
+#define VAMAX 120
+#define VAMIN 40
+#define UAMAX 75
+#define UAMIN -70
+// Angle limits of the limbs
+#define TOLERANCE 1
+// Tolerance required (in end result degrees) to go onto the next command/flip the xRunning variables.
+
+#define TRUCK_INBOX 5
+#define TRUCK_OUTBOX 12
+#define PC_INBOX 3
+#define PC_OUTBOX 15
+#define SHUTDOWN_BOX 7
+// Bluetooth boxes
+
+#define IN 20
+// Constant for pulling in (on the A axis)
+
+float setW=0, setV=90, setU=0;
+// Motor setpoints, in the end result degrees
+bool wRunning, vRunning, uRunning;
+// Whether or not a motor is running
+float wPositions[]={-46, -1,22,45.5,68,91, -23.5, -31.5};
+float zPositions[]={4.5, 1,12,22, 5}; 
+float aPositions[]={33,30.5,31.5,30.5};
+// Various points of interest for the arm. The index 0 for each is the truck.
+bool itemPresent[16];
+// Whether or not a item is present on the racks.
+
+void RunMotor(byte port, float power){
+  if(power>100)
+    power=100;
+  if(power<-100)
+    power=-100;
+
+  if(power>0){
+    OnFwdEx(port, power, RESET_NONE);
+  }else if(power<0){
+    OnRevEx(port, -power, RESET_NONE);
+  }else{
+    OffEx(port, RESET_NONE);
+  }
+}
+// Simplifies running a motor, so that negative and out of range values do not cause issues.
+
+void WaitTC(){
+  vRunning=uRunning=wRunning=true;
+  while(wRunning || vRunning || uRunning)
+    Wait(10);
+}
+// Waits until no motors are running.
+
+inline void GotoW(float w){
+  vRunning=uRunning=wRunning=true;
+  setW=w;
+}
+// Sets the W setpoint.
+
+void MoveW(float w){
+  vRunning=uRunning=wRunning=true;
+  setW=w;
+  while(wRunning)
+    Wait(10);
+}
+// Goes to a point in the W axis.
+
+bool GotoAZ(float a, float z){
+  float tMag=sqrt(a*a + z*z); // Magnitude of the target.
+  float tAngle=atan2(z,a);    // Angle of the target (in radians)
+  float vAngle, uAngle;       // Angles of the arms
+  if(tMag<=VMAG+UMAG && tMag>=abs(VMAG-UMAG)){ // If inside of reach
+    vAngle= acos((VMAG*VMAG + tMag*tMag - UMAG*UMAG)/(2*VMAG*tMag))+tAngle;
+    uAngle= acos((VMAG*VMAG + UMAG*UMAG - tMag*tMag)/(2*VMAG*UMAG))-(PI-vAngle);
+    // Use law of cosines to determine the angles based off the magnitudes of the limbs and target.
+    vAngle=RTOD*vAngle;
+    uAngle=RTOD*uAngle;
+    // Convert angles into degrees
+    if(vAngle<VAMAX && vAngle>VAMIN && uAngle<UAMAX && uAngle>UAMIN){ // If within bounds
+      vRunning=uRunning=wRunning=true;
+      setU=uAngle;
+      setV=vAngle;
+      return true;
+      // Execute the calculations and return true.
+    }else{ // If outside of bounds
+      PlayTone(1000,600);
+      return false;
+      // Beep high-pitched and return false.
+    }
+  }else{ // If outside of reach
+    PlayTone(400,400);
+    return false;
+    // Beep lower-pitched and return false.
+  }
+}
+// Goes to a point in the A-Z plane. Returns false if unable to reach the given point.
+
+void MoveAZ(float endA, float endZ, float frequency=0.5){
+  float startA=cos(setU*DTOR)*UMAG + cos(setV*DTOR)*VMAG;
+  float startZ=sin(setU*DTOR)*UMAG + sin(setV*DTOR)*VMAG;
+  //Calculate our initial position in the A-Z plane.
+  float runMagnitude=sqrt((endA-startA)*(endA-startA) + (endZ-startZ)*(endZ-startZ));
+  float runAngle=atan2((endZ-startZ),(endA-startA));
+  // Turn that into a angle and magnitude.
+  
+  for(float i=1;i<runMagnitude;i+=frequency){ // Iterate the magnitude by the given frequency until we are at our destination.
+    GotoAZ(cos(runAngle)*i + startA, sin(runAngle)*i + startZ);
+    // Go to the the currently iterated 
+    while(vRunning || uRunning)
+      Wait(10);
+    // Wait till done moving to the point.
+  }
+  
+  GotoAZ(endA, endZ);
+  // Go to the end point (just to be safe)
+  while(vRunning || uRunning)
+    Wait(10);
+}
+// Makes a straight line in the A-Z plane, with an optional frequency. (Lower number generates smoother movement.)
+
+inline void Reset(){
+  setW=0;
+  setU=0;
+  setV=90;
+  WaitTC();
+}
+// Resets the arm to its initial state.
+
+string GetMessage(unsigned short box){
+  string res;
+  if(ReceiveMessage(box,true,res)==NO_ERR)
+    return res;
+  else
+    return "ERR";
+}
+// Fetches and returns a string off the given unbox.
+
+task backUpdate(){
+  while(true){
+    RunMotor(OUT_A,((MotorTachoCount(OUT_A)*WRATIO)-setW)*-400);
+    RunMotor(OUT_C,((MotorTachoCount(OUT_C)*URATIO)-setU)*-170);
+    RunMotor(OUT_B,((90 - MotorTachoCount(OUT_B)*VRATIO)-setV)*170);
+    wRunning=abs((MotorTachoCount(OUT_A)*WRATIO)-setW)>TOLERANCE;
+    uRunning=abs((MotorTachoCount(OUT_C)*URATIO)-setU)>TOLERANCE;
+    vRunning=abs((90 - MotorTachoCount(OUT_B)*VRATIO)-setV)>TOLERANCE;
+    ResetSleepTimer();
+  }
+  OffEx(OUT_ABC,RESET_NONE);
+}
+// The motor monitoring thread
+
+task main(){
+  start backUpdate;
+  Wait(100);
+  // Start up the motor monitoring thread
+
+  string message;  // The message that we get
+  
+  SendMessage(TRUCK_OUTBOX,"JUNK");
+  // Send a message to the truck (It goes through the laptop) (This helps to make comms smoother)
+  
+  while(true){
+    message=GetMessage(PC_INBOX); // Get a message from the PC
+    
+
+
+    if(message[0]=='!'){
+      int items[5]; // The numbers of the containers to be retrieved
+      int itemsLen=0; // The number of containers to be retrieved
+      for(;itemsLen<=strlen(message)-1;itemsLen++)
+        items[itemsLen]=(message[itemsLen]-97);
+      // Read the string into the length and number variables
+      
+      if(itemsLen<=1){
+        SendMessage(TRUCK_OUTBOX,"!d");
+      }else{
+        SendMessage(TRUCK_OUTBOX,"!w");
+      }
+      // Tell the truck we have an order.
+
+      message=GetMessage(TRUCK_INBOX);
+      while(message[0]!='!'){
+        message=GetMessage(TRUCK_INBOX);
+        Wait(5);
+      }
+      // Wait until we recieve a message.
+      
+      bool depositing;     // Whether or not we are depositing.
+      if(message[1]=='w'){ // If truck is okay with skipping to withdrawal
+        depositing=false;  // Reflect that we will not be depositing.
+      }else if(message[1]=='d'){    // If the truck is okay with depositing
+        depositing=true;      // Change the depositing variable to reflect that
+        GotoW(wPositions[0]);
+        MoveAZ(IN,zPositions[0]);
+        WaitTC();
+        // Go to the truck
+
+        message=GetMessage(TRUCK_INBOX);
+        while(message[0]!='>'){
+          message=GetMessage(TRUCK_INBOX);
+          Wait(5);
+        }
+        // Wait until we recieve a message.
+      
+        while(message[1] != 'f'){ // While the truck is still loaded
+          message=GetMessage(TRUCK_INBOX);
+          GotoW(wPositions[0]);
+          MoveAZ(IN,zPositions[0]);
+          WaitTC();
+          MoveAZ(aPositions[0],zPositions[0]);
+          MoveAZ(aPositions[0],zPositions[0]+5);
+          MoveAZ(23,zPositions[0]+5);
+          MoveAZ(23,zPositions[0]);
+          // Get a container off the truck.
+          
+          do{
+            MoveW(wPositions[7]);
+            MoveAZ(29,3.5);
+            // Get in position to scan first bar.
+
+            SendMessage(TRUCK_OUTBOX,"#?");
+            // Tell truck to scan.
+            message=GetMessage(TRUCK_INBOX);
+            while(message[0]!='#'){
+              message=GetMessage(TRUCK_INBOX);
+              Wait(5);
+            }
+            // Wait till we get a message.
+          
+            MoveAZ(25,4);
+            MoveW(wPositions[6]);
+            MoveAZ(28,3.5);
+            // Get in position to scan second bar.
+          
+            SendMessage(TRUCK_OUTBOX,"#?");
+            // Tell truck to scan.
+            message=GetMessage(TRUCK_INBOX);
+            while(message[0]!='#'){
+              message=GetMessage(TRUCK_INBOX);
+              Wait(5);
+            }
+            // Wait till we get a message.
+
+            MoveAZ(25,4);
+            // Pull back
+          }while(message[1]=='!' || message[2]=='!'); // As long as the selection is invalid.
+
+          
+          short x=(floor((message[1]-97)*4 + (message[2]-97))/3)+1;
+          short y=(((message[1]-97)*4 + (message[2]-97))%3)+1;
+          // Convert a base-4 barcode scan into a useful number, and then into its x and y position on the shelves.
+          itemPresent[(message[1]-97)*4 + (message[2]-97)]=true;
+          // Keep track of the deposit.
+        
+          GotoW(wPositions[x]);
+          MoveAZ(IN,zPositions[y]+7);
+          WaitTC();
+          MoveAZ(aPositions[y],zPositions[y]+7);
+          MoveAZ(aPositions[y],zPositions[y]);
+          MoveAZ(IN,zPositions[y]);
+          // Deposit the containter.
+
+          message=GetMessage(TRUCK_INBOX);
+          while(message[0]!='@'){
+            message=GetMessage(TRUCK_INBOX);
+            Wait(5);
+          }
+          // Wait until we recieve a message.
+        }
+        SendMessage(TRUCK_OUTBOX,"#-");
+        // Tell truck we are done scanning.
+      }else{ // If truck is not okay with depositing
+        SendMessage(PC_OUTBOX,"!-"); // Tell computer we are not filling the order since it is null
+        continue; // Pass through rest of this code, restart the loop.
+      }
+
+      for(short i=1;i<itemsLen;i++){   // Iterate through each item
+        short x=(floor(items[i])/3)+1;
+        short y=((items[i])%3)+1;
+        // Convert current item into x and y position.
+
+        GotoW(wPositions[x]);
+        MoveAZ(IN,zPositions[y]);
+        WaitTC();
+        MoveAZ(aPositions[y],zPositions[y]);
+        MoveAZ(aPositions[y],zPositions[y]+7);
+        MoveAZ(IN,zPositions[y]+7);
+        GotoW(wPositions[0]);
+        MoveAZ(IN,zPositions[0]+5);
+        WaitTC();
+        // Get the containter.
+
+        if(!depositing && i==1){
+          message=GetMessage(TRUCK_INBOX);
+          while(message[0]!='>'){
+            message=GetMessage(TRUCK_INBOX);
+            Wait(5);
+          }
+        }
+        // If we were not making a deposit and this is the first container, wait so that nothing goes crazy.
+
+        MoveAZ(aPositions[0],zPositions[0]+5);
+        MoveAZ(aPositions[0],zPositions[0]);
+        MoveAZ(IN,zPositions[0]);
+        // Put container on truck.
+
+        itemPresent[items[i]]=false;
+        // Keep track of the withdrawal.
+      }
+
+      SendMessage(TRUCK_OUTBOX,">");
+      // Tell truck to go.
+      Reset();
+      // Reset all setpoints (So if powered off, we are already calibrated)
+    }
+
+    char list[18];
+    // A list of whether or not certain items exist.
+    for(unsigned short i=0;i<=15;i++){ // Iterate through each record of each item.
+      if(itemPresent[i])
+        list[i]='y';
+      else
+        list[i]='n';
+      // Append to the list whether or not the item is present
+    }
+    SendMessage(17,list);
+    // Send the computer a message (On a separate inbox) about the item state.
+  }
+}

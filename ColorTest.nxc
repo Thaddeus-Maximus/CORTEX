@@ -1,0 +1,43 @@
+struct Threshold{
+  int minR, minG, minB;
+  unsigned int maxR, maxG, maxB;
+};
+
+bool InRange(ColorSensorReadType &csr, Threshold &thresh){
+  bool in=true;
+  in&=csr.NormalizedArray[0]<=thresh.maxR;
+  in&=csr.NormalizedArray[1]<=thresh.maxG;
+  in&=csr.NormalizedArray[2]<=thresh.maxB;
+  in&=csr.NormalizedArray[0]>=thresh.minR;
+  in&=csr.NormalizedArray[1]>=thresh.minG;
+  in&=csr.NormalizedArray[2]>=thresh.minB;
+  return in;
+}
+
+Threshold Red={180,20,20,250,130,130},
+Green={90,160,90,160,255,160},
+Blue={40,100,160,80,150,200},
+White={210,210,210,300,300,300},
+GroundBlack={0,0,0,150,150,150},
+GroundGreen={120,180,120,170,220,160};
+
+task main(){
+  SetSensorColorFull(S2);
+  ColorSensorReadType csr;
+  csr.Port=S2;
+  
+  while(true){
+    SysColorSensorRead(csr);
+    ClearScreen();
+    NumOut(0,LCD_LINE1,csr.NormalizedArray[0]);
+    NumOut(0,LCD_LINE2,csr.NormalizedArray[1]);
+    NumOut(0,LCD_LINE3,csr.NormalizedArray[2]);
+    
+    if(InRange(csr,Blue)){
+      PlayTone(500,10);
+      TextOut(0,LCD_LINE5,"BEEP!");
+    }
+    
+    Wait(10);
+  }
+}

@@ -1,0 +1,45 @@
+#define KP 0.5
+#define KI 0.02
+
+#define SETPOINT 190
+
+void LimitTo(float &in, float max){
+  if(in>max)
+    in=max;
+  else if(in<-max)
+    in=-max;
+}
+
+void RunMotor(byte port, float power){
+  power=floor(power);
+  LimitTo(power,100);
+
+	if(power>0){
+		OnFwdEx(port, power, RESET_NONE);
+	}else if(power<0){
+		OnRevEx(port, -power, RESET_NONE);
+	}else{
+		OffEx(port, RESET_NONE);
+	}
+}
+
+void Drive(float y, float w){
+  RunMotor(OUT_B,-y+w);
+  RunMotor(OUT_C,-y-w);
+}
+
+task main(){
+  SetSensorColorFull(S1);
+  ColorSensorReadType ground;
+  ground.Port=S1;
+  float integral;
+
+  while(true){
+        SysColorSensorRead(ground);
+        float error=ground.NormalizedArray[2]-SETPOINT;
+        integral+=error;
+        LimitTo(integral,2000);
+        Drive(50,error*KP + integral*KI);
+        Wait(10);
+      }
+}

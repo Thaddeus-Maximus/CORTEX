@@ -1,0 +1,275 @@
+#define ARM_INBOX 2
+#define ARM_OUTBOX 15
+#define PC_INBOX 1
+#define PC_OUTBOX 16
+#define SHUTDOWN_BOX 7
+// Bluetooth boxes
+
+#define KP 0.5
+#define KI 0.02
+// Proportional and integral constants for line following
+
+#define SETPOINT 190
+// Setpoint for line following
+
+struct Threshold{
+  int minR, minG, minB;
+  unsigned int maxR, maxG, maxB;
+};
+// A threshold for the color sensor.
+
+bool InRange(ColorSensorReadType &csr, Threshold &thresh){
+  bool in=true;
+  in&=csr.NormalizedArray[0]<=thresh.maxR;
+  in&=csr.NormalizedArray[1]<=thresh.maxG;
+  in&=csr.NormalizedArray[2]<=thresh.maxB;
+  in&=csr.NormalizedArray[0]>=thresh.minR;
+  in&=csr.NormalizedArray[1]>=thresh.minG;
+  in&=csr.NormalizedArray[2]>=thresh.minB;
+  return in;
+}
+// Returns whether or not the given color sensor value is within the given threshold.
+
+Threshold Red={180,0,0,250,130,130},
+Green={90,160,90,160,255,160},
+Blue={0,100,140,80,150,200},
+White={200,200,200,300,300,300},
+GroundBlack={0,0,0,150,150,150},
+GroundGreen={120,180,120,170,220,160};
+// Different colors that we will detect.
+
+void LimitTo(float &in, float max){
+  if(in>max)
+    in=max;
+  else if(in<-max)
+    in=-max;
+}
+// Limits an input's absolute value to that of the max.
+
+void RunMotor(byte port, float power){
+  power=floor(power);
+  LimitTo(power,100);
+
+  if(power>0){
+    OnFwdEx(port, power, RESET_NONE);
+  }else if(power<0){
+    OnRevEx(port, -power, RESET_NONE);
+  }else{
+    OffEx(port, RESET_NONE);
+  }
+}
+// Simplifies running a motor, so that negative and out of range values do not cause issues.
+
+void Drive(float y, float w){
+  RunMotor(OUT_B,-y+w);
+  RunMotor(OUT_C,-y-w);
+}
+// Simplifies driving into y and w force vectors.
+
+string GetMessage(unsigned short box){
+  string res;
+  if(ReceiveMessage(box,true,res)==NO_ERR)
+    return res;
+  else
+    return "ERR";
+}
+// Fetches and returns a string off the given unbox.
+
+task main(){
+  SetSensorColorFull(S1);
+  SetSensorColorFull(S2);
+  ColorSensorReadType ground;
+  ColorSensorReadType scanner;
+  ground.Port=S1;
+  scanner.Port=S2;
+  SetSensorLowspeed(IN_4);
+  
+  float integral;  // Integral for line following
+  string message;  // Current bluetooth message
+  
+  SendMessage(ARM_OUTBOX,"SPAM");
+  // Send a test message to the arm for debug purposes, and to smoothen comms.
+  
+  while(true){
+    ResetSleepTimer();
+    message=GetMessage(ARM_INBOX);
+    Wait(5);
+    if(message[0]=='!'){
+      bool depositing=true; // Whether or not we will be depositing
+      if(SensorUS(IN_4) < 12){          // If we have something on our racks
+        SendMessage(ARM_OUTBOX,"!d");   // Tell arm we will be depositing.
+      }else{                            // If the racks are empty
+        if(message[1]=='d'){            // If the arm says this order is deposit-only
+          SendMessage(ARM_OUTBOX,"!-"); // Tell arm this is a null order.
+          continue;                     // Restart the loop.
+        }else{                          // If this is a full order
+          SendMessage(ARM_OUTBOX,"!w"); // Tell arm we will deposit as well as withdraw.
+          depositing=false;             // Keep track of this.
+        }
+      }
+      
+      
+      RotateMotor(OUT_A,60,460);  // Close lid
+      RotateMotorEx(OUT_BC,85,600,-100,true,true);
+      RotateMotor(OUT_BC,-70,200);
+      SysColorSensorRead(ground);
+      while(!InRange(ground,GroundBlack)){
+        SysColorSensorRead(ground);
+        Drive(0,50);
+        Wait(10);
+      }
+      // Turn around
+      
+      
+      while(!InRange(ground,GroundGreen)){  // While we haven't reached the end
+        SysColorSensorRead(ground);
+        float error=ground.NormalizedArray[2]-SETPOINT;
+        integral+=error;
+        LimitTo(integral,2000);
+        // Read color sensor, calculate error, increase integral, and limit it to 2000.
+
+        Drive(50,error*KP + integral*KI);
+
+        ResetSleepTimer();
+        // Don't fall asleep.
+        Wait(10);
+        // Wait so that our integral isn't racked up instantaneously.
+      }
+      // Follow line until at arm using a proportional-integral loop.
+      Drive(50,0);
+      Wait(300);
+      Drive(0,0);
+      // Ram into the jig.
+
+      SendMessage(ARM_OUTBOX,">");
+      // Tell arm we are here.
+      RotateMotor(OUT_A,60,-460);
+      // Open the lid.
+      
+      if(depositing){ // If depositing
+        message=GetMessage(ARM_INBOX);
+        while(message[1]!='-'){
+          string output="#";
+          // Message to send back to arm, containing barcode info.
+          
+          while(message[0]!='#' && message[1]!='!'){
+            message=GetMessage(ARM_INBOX);
+            Wait(5);
+          }
+          // Wait for a message from the arm.
+
+          bool worked=true;
+
+          Wait(200);
+          // Wait a little for things to stabilize.
+          SysColorSensorRead(scanner);
+          // Read color sensor.
+          if(InRange(scanner,White)){
+            output+="a";
+          }else if(InRange(scanner,Red)){
+            output+="b";
+          }else if(InRange(scanner,Green)){
+            output+="c";
+          }else if(InRange(scanner,Blue)){
+            output+="d";
+          }else{
+            output+="!";
+            worked=false;
+          }
+          // Add to output string accordingly.
+          SendMessage(ARM_OUTBOX,"#>");
+          // Tell arm to move to next bar.
+
+          message=GetMessage(ARM_INBOX);
+          while(message[0]!='#' && message[1]!='!'){
+            message=GetMessage(ARM_INBOX);
+            Wait(5);
+          }
+          // Wait for a message from the arm.
+
+          Wait(200);
+          // Wait a little for things to stabilize.
+          SysColorSensorRead(scanner);
+          // Read color sensor.
+          if(InRange(scanner,White)){
+            output+="a";
+          }else if(InRange(scanner,Red)){
+            output+="b";
+          }else if(InRange(scanner,Green)){
+            output+="c";
+          }else if(InRange(scanner,Blue)){
+            output+="d";
+          }else{
+            output+="!";
+            worked=false;
+          }
+          // Add to output accordingly.
+          
+          SendMessage(ARM_OUTBOX,output);
+          // Give arm the data about the scanned container.
+          
+          if(worked){
+            if(SensorUS(IN_4)<12){
+              SendMessage(ARM_OUTBOX,"@c");
+            }else{
+              SendMessage(ARM_OUTBOX,"@f");
+            }
+          }
+          // Tell arm if there is a container on the racks.
+          
+          message=GetMessage(ARM_INBOX);
+          while(message[0]!='#'){
+            message=GetMessage(ARM_INBOX);
+            Wait(5);
+          }
+          // Wait for a message from the arm.
+        }
+      }
+      
+      message=GetMessage(ARM_INBOX);
+      while(message[0]!='>'){
+        message=GetMessage(ARM_INBOX);
+        Wait(5);
+      }
+      // Wait for a message from the arm.
+
+      RotateMotor(OUT_A,60,460);
+      // Close lid 
+      
+      Drive(-50,0);
+      Wait(400);
+      Drive(0,0);
+      RotateMotorEx(OUT_BC,85,600,-100,true,true);
+      RotateMotor(OUT_BC,-70,200);
+      SysColorSensorRead(ground);
+      while(!InRange(ground,GroundBlack)){
+        SysColorSensorRead(ground);
+        Drive(0,50);
+        Wait(10);
+      }
+      // Turn around
+      
+      OffEx(OUT_BC,RESET_NONE);
+      while(!InRange(ground,GroundGreen)){
+        SysColorSensorRead(ground);
+        float error=ground.NormalizedArray[2]-SETPOINT;
+        integral+=error;
+        LimitTo(integral,2000);
+        // Read color sensor, calculate error, increase integral, and limit it to 2000.
+
+        Drive(50,error*KP + integral*KI);
+
+        ResetSleepTimer();
+        // Don't fall asleep.
+        Wait(10);
+        // Wait so that our integral isn't racked up instantaneously.
+      }
+      // Follow line back until green using a proportional-integral loop.
+
+      OffEx(OUT_BC,RESET_NONE);
+      // Shut off motors
+      RotateMotor(OUT_A,60,-460);
+      // Open lid
+    }
+  }
+}
